@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Class Schedule Heatmap</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: #1a1c24; color: #e2e8f0; min-height: 100vh; margin: 0; padding: 0.5rem; display: flex; flex-direction: column; align-items: center; }
+    .heatmap-container { overflow-x: auto; overflow-y: auto; flex: 1; margin-top: 0.5rem; position: relative; background: #2c2f3a; border-radius: 0.5rem; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); padding: 0.25rem; width: 100%; max-width: 90vw; }
+    .heatmap { display: grid; grid-template-columns: minmax(70px, auto) repeat(5, 1fr); gap: 1px; font-size: 0.6em; user-select: none; }
+    .heatmap div { padding: 1px; text-align: center; border-radius: 0.125rem; }
+    .heatmap .time-label { font-weight: 600; position: sticky; left: 0; background: #2c2f3a; z-index: 10; color: #a0aec0; border-right: 1px solid #3a3e4a; }
+    .heatmap .day-header { font-weight: 600; position: sticky; top: 0; background: #2c2f3a; z-index: 10; color: #a0aec0; border-bottom: 1px solid #3a3e4a; }
+    .heatmap .cell { cursor: pointer; min-width: 40px; min-height: 6px; line-height: 6px; color: white; font-weight: 600; transition: transform 0.1s ease; }
+    .heatmap .cell:hover { transform: scale(1.05); }
+    #classModal { display: none; position: fixed; top: 10%; left: 50%; transform: translateX(-50%); background: #2d3748; color: #e2e8f0; border: none; padding: 0.75rem; border-radius: 0.5rem; max-width: 75vw; max-height: 50vh; overflow-y: auto; z-index: 1000; user-select: text; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); }
+    #overlayDim { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.6); z-index: 999; }
+    #classModal::-webkit-scrollbar { width: 4px; }
+    #classModal::-webkit-scrollbar-thumb { background-color: #4a5568; border-radius: 0.125rem; }
+    .upload-container { background: #2c2f3a; padding: 0.5rem; border-radius: 0.5rem; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); transition: transform 0.2s ease; width: 100%; max-width: 90vw; }
+    .upload-container:hover { transform: translateY(-1px); }
+  </style>
+</head>
+<body>
+  <h1 class="text-md font-semibold text-indigo-300 mb-1">Class Schedule Heatmap</h1>
+  <div class="upload-container text-center mb-2">
+    <label for="fileInput" class="cursor-pointer bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-3 py-1.5 rounded-md inline-block select-none transition duration-200 ease-in-out shadow hover:shadow-md">
+      Click here and upload Naviate enrollment report CSV
+    </label>
+    <input type="file" id="fileInput" accept=".csv" style="display: none;">
+    <p class="mt-0.5 text-[0.65rem] text-gray-400" id="fileName">No file selected</p>
+    <div id="loading" class="hidden flex flex-col items-center space-y-0.5 text-gray-300 mt-1">
+      <svg class="animate-spin h-4 w-4 text-indigo-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+      </svg>
+      <p class="text-[0.65rem]">Processing...</p>
+    </div>
+    <div id="errorMessage" class="hidden bg-red-900 bg-opacity-20 text-red-200 rounded-md p-0.5 mt-1 text-[0.65rem]"></div>
+  </div>
+  <div class="heatmap-container" id="heatmapContainer" role="grid">
+    <div id="heatmap" class="heatmap"></div>
+  </div>
+  <div id="overlayDim"></div>
+  <div id="classModal" role="dialog" aria-modal="true" tabindex="0"></div>
+  <script>
+    (function() {
+      function generateTimeSlots() {
+        const slots = [];
+        let start = new Date(0,0,0,8,0);
+        const end = new Date(0,0,0,20,0);
+        while(start < end) { slots.push(new Date(start)); start.setMinutes(start.getMinutes() + 5); }
+        return slots;
+      }
+      function parseTime(timeStr) {
+        if (!timeStr || typeof timeStr !== 'string') return null;
+        const match = timeStr.match(/(\d+):(\d+) (AM|PM) ET/);
+        if (!match) return null;
+        let hour = parseInt(match[1]);
+        const minute = parseInt(match[2]);
+        const period = match[3];
+        if (period === 'PM' && hour < 12) hour += 12;
+        if (period === 'AM' && hour === 12) hour = 0;
+        return new Date(0,0,0,hour,minute);
+      }
+      function formatTime(date) { return date.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}); }
+      function parseCSV(content) {
+        const lines = content.split('\n').filter(line => line.trim() !== '');
+        if (lines.length < 2) throw new Error("CSV file is empty or contains no data rows.");
+        const headers = parseCSVLine(lines[0]);
+        const data = lines.slice(1).map(line => {
+          const values = parseCSVLine(line);
+          if (values.length !== headers.length) return null;
+          return headers.reduce((obj, header, i) => { obj[header] = values[i] || ''; return obj; }, {});
+        }).filter(row => row !== null && row['Dropped?'] === 'No');
+        return data;
+      }
+      function parseCSVLine(line) {
+        const values = [];
+        let currentValue = '';
+        let inQuotes = false;
+        for (let i = 0; i < line.length; i++) {
+          const char = line[i];
+          if (char === '"') { inQuotes = !inQuotes; }
+          else if (char === ',' && !inQuotes) { values.push(currentValue.trim()); currentValue = ''; }
+          else { currentValue += char; }
+        }
+        values.push(currentValue.trim());
+        return values;
+      }
+      function buildHeatmapData(data) {
+        const days = ['M','T','W','R','F'];
+        const timeSlots = generateTimeSlots();
+        const heatmapData = timeSlots.map(slot => ({
+          time: slot,
+          counts: new Array(days.length).fill(0),
+          totalStudents: days.map(() => new Set()), // Track unique students per slot per day
+          details: days.map(() => new Map()) // Map<courseCode, {students: Set, start: string, end: string}>
+        }));
+
+        data.forEach(row => {
+          const startTime = parseTime(row['Start Time']);
+          const endTime = parseTime(row['End Time']);
+          const classDays = row['Class Days'] || '';
+          const studentId = row['Student ID'];
+          const courseCode = row['Enrollment Course Number'] || 'UNKNOWN-CODE';
+          const startStr = startTime ? formatTime(startTime) : 'N/A';
+          const endStr = endTime ? formatTime(endTime) : 'N/A';
+
+          if (!startTime || !endTime) return;
+
+          days.forEach((day, dayIndex) => {
+            if (classDays.includes(day)) {
+              heatmapData.forEach(slotData => {
+                const slotEnd = new Date(slotData.time);
+                slotEnd.setMinutes(slotEnd.getMinutes() + 5);
+                if (startTime < slotEnd && endTime > slotData.time) {
+                  const classMap = slotData.details[dayIndex];
+                  if (!classMap.has(courseCode)) {
+                    classMap.set(courseCode, { students: new Set(), start: startStr, end: endStr });
+                  }
+                  if (studentId && /^\d{8}$/.test(studentId)) {
+                    classMap.get(courseCode).students.add(studentId);
+                    slotData.totalStudents[dayIndex].add(studentId); // Track unique students for total count
+                  }
+                }
+              });
+            }
+          });
+        });
+
+        // Update counts to reflect unique student totals per slot per day
+        heatmapData.forEach(slotData => {
+          slotData.counts = slotData.totalStudents.map(studentSet => studentSet.size);
+        });
+
+        return { timeSlots, days, heatmapData };
+      }
+      function getColorForCount(count, maxCount) {
+        if (count === 0) return '#2ecc71';
+        const hue = Math.max(0, 120 - (count/maxCount)*120);
+        return `hsl(${hue}, 75%, 50%)`;
+      }
+      function renderHeatmap({ timeSlots, days, heatmapData }) {
+        const heatmap = document.getElementById('heatmap');
+        heatmap.innerHTML = '';
+        heatmap.appendChild(document.createElement('div'));
+        days.forEach(day => {
+          const dayDiv = document.createElement('div');
+          dayDiv.className = 'day-header';
+          dayDiv.textContent = day;
+          heatmap.appendChild(dayDiv);
+        });
+        let maxCount = 0;
+        heatmapData.forEach(slot => { slot.counts.forEach(c => { if (c > maxCount) maxCount = c; }); });
+        if (maxCount === 0) maxCount = 1;
+        heatmapData.forEach((slotData, slotIndex) => {
+          const timeDiv = document.createElement('div');
+          timeDiv.className = 'time-label';
+          timeDiv.textContent = formatTime(slotData.time);
+          heatmap.appendChild(timeDiv);
+          slotData.counts.forEach((count, dayIndex) => {
+            const cell = document.createElement('div');
+            cell.className = 'cell';
+            cell.textContent = count > 0 ? count : '';
+            cell.style.backgroundColor = getColorForCount(count, maxCount);
+            if (count > 0) {
+              const classMap = slotData.details[dayIndex];
+              const classData = Array.from(classMap.entries()).map(([code, info]) => ({
+                code,
+                students: Array.from(info.students),
+                start: info.start,
+                end: info.end
+              }));
+              // Sort by number of students, descending
+              classData.sort((a, b) => b.students.length - a.students.length);
+              cell.dataset.classes = JSON.stringify(classData);
+              cell.dataset.time = formatTime(slotData.time);
+              cell.addEventListener('click', (e) => {
+                const classes = JSON.parse(e.currentTarget.dataset.classes || '[]');
+                const clickedTime = e.currentTarget.dataset.time;
+                const modal = document.getElementById('classModal');
+                const overlay = document.getElementById('overlayDim');
+                let modalContent = '';
+                if (classes.length === 0) {
+                  modalContent += `<h2 class="text-base font-bold mb-2 text-indigo-300">Courses at ${clickedTime}</h2>`;
+                  modalContent += '<p class="text-gray-400 text-sm">No data available.</p>';
+                } else {
+                  let totalStudents = 0;
+                  const uniqueStudents = new Set();
+                  classes.forEach(cls => {
+                    totalStudents += cls.students.length;
+                    cls.students.forEach(id => uniqueStudents.add(id));
+                    modalContent += `<p class="font-medium text-white text-sm">${cls.code} <span class="text-indigo-400">(${cls.students.length})</span> <span class="text-gray-400">(${cls.start} - ${cls.end})</span></p>`;
+                    modalContent += `<p class="mb-2 text-xs text-gray-300">${cls.students.join(' ')}</p>`;
+                  });
+                  modalContent = `<h2 class="text-base font-bold mb-2 text-indigo-300">Courses at ${clickedTime} <span class="text-indigo-400">(Total Unique Students: ${uniqueStudents.size})</span></h2>` + modalContent;
+                }
+                modal.innerHTML = modalContent;
+                modal.style.display = 'block';
+                overlay.style.display = 'block';
+                modal.focus();
+              });
+            }
+            heatmap.appendChild(cell);
+          });
+        });
+      }
+      function closeModal() {
+        document.getElementById('classModal').style.display = 'none';
+        document.getElementById('overlayDim').style.display = 'none';
+      }
+      document.getElementById('overlayDim').addEventListener('click', closeModal);
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+      document.getElementById('fileInput').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        document.getElementById('fileName').textContent = file.name;
+        document.getElementById('loading').classList.remove('hidden');
+        document.getElementById('errorMessage').classList.add('hidden');
+        const reader = new FileReader();
+        reader.onload = function(event) {
+          try {
+            const content = event.target.result;
+            const data = parseCSV(content);
+            if (data.length === 0) throw new Error("No valid data rows found.");
+            const heatmapObj = buildHeatmapData(data);
+            renderHeatmap(heatmapObj);
+          } catch (error) {
+            const errDiv = document.getElementById('errorMessage');
+            errDiv.textContent = `Error: ${error.message}`;
+            errDiv.classList.remove('hidden');
+          } finally {
+            document.getElementById('loading').classList.add('hidden');
+          }
+        };
+        reader.onerror = function() {
+          const errDiv = document.getElementById('errorMessage');
+          errDiv.textContent = "Error reading file.";
+          errDiv.classList.remove('hidden');
+          document.getElementById('loading').classList.add('hidden');
+        };
+        reader.readAsText(file);
+      });
+    })();
+  </script>
+</body>
+</html>
